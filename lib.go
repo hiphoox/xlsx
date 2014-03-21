@@ -309,7 +309,6 @@ func readRowsFromSheet(Worksheet *xlsxWorksheet, file *File) ([]*Row, int, int) 
 	var minCol, maxCol, minRow, maxRow, colCount, rowCount int
 	var reftable []string
 	var err error
-	var insertRowIndex, insertColIndex int
 
 	if len(Worksheet.SheetData.Row) == 0 {
 		return nil, 0, 0
@@ -322,42 +321,23 @@ func readRowsFromSheet(Worksheet *xlsxWorksheet, file *File) ([]*Row, int, int) 
 	rowCount = (maxRow - minRow) + 1
 	colCount = (maxCol - minCol) + 1
 	rows = make([]*Row, rowCount)
-	insertRowIndex = minRow
-	for rowIndex := 0; rowIndex < len(Worksheet.SheetData.Row); rowIndex++ {
+	for rowIndex := 0; rowIndex < rowCount; rowIndex++ {
 		rawrow := Worksheet.SheetData.Row[rowIndex]
-		// Some spreadsheets will omit blank rows from the
-		// stored data
-		for rawrow.R > (insertRowIndex + 1) {
-			// Put an empty Row into the array
-			rows[insertRowIndex-minRow] = new(Row)
-			insertRowIndex++
-		}
 		// range is not empty
 		if len(rawrow.Spans) != 0 {
 			row = makeRowFromSpan(rawrow.Spans)
 		} else {
 			row = makeRowFromRaw(rawrow)
 		}
-
-		insertColIndex = minCol
 		for _, rawcell := range rawrow.C {
 			x, _, _ := getCoordsFromCellIDString(rawcell.R)
-
-			// Some spreadsheets will omit blank cells
-			// from the data.
-			for x > insertColIndex {
-				// Put an empty Cell into the array
-				row.Cells[insertColIndex-minCol] = new(Cell)
-				insertColIndex++
+			if x < len(row.Cells) {
+				row.Cells[x].Value = getValueFromCellData(rawcell, reftable)
+				row.Cells[x].styleIndex = rawcell.S
+				row.Cells[x].styles = file.styles
 			}
-			cellX := insertColIndex - minCol
-			row.Cells[cellX].Value = getValueFromCellData(rawcell, reftable)
-			row.Cells[cellX].styleIndex = rawcell.S
-			row.Cells[cellX].styles = file.styles
-			insertColIndex++
 		}
-		rows[insertRowIndex-minRow] = row
-		insertRowIndex++
+		rows[rowIndex] = row
 	}
 	return rows, colCount, rowCount
 }
@@ -372,18 +352,17 @@ type indexedSheet struct {
 // into a Sheet struct.  This work can be done in parallel and so
 // readSheetsFromZipFile will spawn an instance of this function per
 // sheet and get the results back on the provided channel.
-func readSheetFromFile(sc chan *indexedSheet, index int, rsheet xlsxSheet, fi *File, sheetXMLMap map[string]string) {
+func readSheetFromFile(index int, rsheet xlsxSheet, fi *File, sheetXMLMap map[string]string) (resultSheet *indexedSheet){
 	result := &indexedSheet{Index: index, Sheet: nil, Error: nil}
 	worksheet, error := getWorksheetFromSheet(rsheet, fi.worksheets, sheetXMLMap)
 	if error != nil {
 		result.Error = error
-		sc <- result
-		return
+		return result
 	}
 	sheet := new(Sheet)
 	sheet.Rows, sheet.MaxCol, sheet.MaxRow = readRowsFromSheet(worksheet, fi)
 	result.Sheet = sheet
-	sc <- result
+	return result
 }
 
 // readSheetsFromZipFile is an internal helper function that loops
@@ -408,12 +387,8 @@ func readSheetsFromZipFile(f *zip.File, file *File, sheetXMLMap map[string]strin
 	sheetCount = len(workbook.Sheets.Sheet)
 	sheets := make([]*Sheet, sheetCount)
 	names := make([]string, sheetCount)
-	sheetChan := make(chan *indexedSheet, sheetCount)
 	for i, rawsheet := range workbook.Sheets.Sheet {
-		go readSheetFromFile(sheetChan, i, rawsheet, file, sheetXMLMap)
-	}
-	for j := 0; j < sheetCount; j++ {
-		sheet := <-sheetChan
+    sheet := readSheetFromFile(i, rawsheet, file, sheetXMLMap)
 		if sheet.Error != nil {
 			return nil, nil, sheet.Error
 		}
